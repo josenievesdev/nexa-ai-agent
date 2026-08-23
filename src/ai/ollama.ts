@@ -142,16 +142,34 @@ for (let iteration = 0; iteration < 8; iteration++) {
     if (toolCalls.length === 0) {
       const text = assistantMessage.content?.trim() || "Sin respuesta.";
 
-      const totalElapsed = performance.now() - requestStart;
+const totalElapsed = performance.now() - requestStart;
 
 console.log(
   `\n[REQUEST COMPLETE] ${totalElapsed.toFixed(0)} ms`
 );
 
-      return {
-        text,
-        history: messages.slice(1),
-      };
+const cleanHistory = messages
+  .slice(1)
+  .filter((message) => {
+    if (message.role === "tool") {
+      return false;
+    }
+
+    if (
+      message.role === "assistant" &&
+      message.tool_calls &&
+      message.tool_calls.length > 0
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+return {
+  text,
+  history: cleanHistory,
+};
     }
 
     for (const toolCall of toolCalls) {
