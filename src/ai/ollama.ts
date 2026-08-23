@@ -81,6 +81,10 @@ export async function responderConAgente(
   userText: string,
   history: Message[] = []
 ): Promise<{ text: string; history: Message[] }> {
+
+  console.log("\n[USER]");
+  console.log(userText);
+
   const messages: Message[] = [
     {
       role: "system",
@@ -107,6 +111,12 @@ export async function responderConAgente(
     }
 
     const toolCalls = assistantMessage.tool_calls ?? [];
+
+    if (toolCalls.length > 0) {
+      console.log("\n[TOOL REQUEST]");
+      console.log(
+      toolCalls.map((tool) => tool.function.name)
+    );}
 
     messages.push({
       role: "assistant",
@@ -145,6 +155,10 @@ export async function responderConAgente(
               : "Error desconocido ejecutando la herramienta.",
         };
       }
+
+      console.log("\n[TOOL RESPONSE]");
+      console.log(toolName);
+      console.log(result);
 
       messages.push({
         role: "tool",
