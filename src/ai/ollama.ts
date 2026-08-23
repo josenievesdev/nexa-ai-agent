@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { performance } from "node:perf_hooks";
 import { executeTool, toolDefinitions } from "../tools/index.js";
 
 const OLLAMA_HOST =
@@ -85,6 +86,8 @@ export async function responderConAgente(
   console.log("\n[USER]");
   console.log(userText);
 
+  const requestStart = performance.now();
+
   const messages: Message[] = [
     {
       role: "system",
@@ -97,8 +100,16 @@ export async function responderConAgente(
     },
   ];
 
-  for (let iteration = 0; iteration < 8; iteration++) {
-    const response = await callOllama(messages);
+for (let iteration = 0; iteration < 8; iteration++) {
+  const modelStart = performance.now();
+
+  const response = await callOllama(messages);
+
+  const modelElapsed = performance.now() - modelStart;
+
+  console.log(
+    `\n[MODEL] Iteración ${iteration + 1}: ${modelElapsed.toFixed(0)} ms`
+  );
 
     if (response.error) {
       throw new Error(response.error);
@@ -112,12 +123,6 @@ export async function responderConAgente(
 
     const toolCalls = assistantMessage.tool_calls ?? [];
 
-    if (toolCalls.length > 0) {
-      console.log("\n[TOOL REQUEST]");
-      console.log(
-      toolCalls.map((tool) => tool.function.name)
-    );}
-
     messages.push({
       role: "assistant",
       content: assistantMessage.content ?? "",
@@ -126,6 +131,12 @@ export async function responderConAgente(
 
     if (toolCalls.length === 0) {
       const text = assistantMessage.content?.trim() || "Sin respuesta.";
+
+      const totalElapsed = performance.now() - requestStart;
+
+console.log(
+  `\n[REQUEST COMPLETE] ${totalElapsed.toFixed(0)} ms`
+);
 
       return {
         text,
@@ -142,6 +153,18 @@ export async function responderConAgente(
 
       let result: unknown;
 
+      if (!toolName) {
+      continue;
+      }
+
+      console.log(`\n[TOOL REQUEST] ${toolName}`);
+
+console.log(
+  JSON.stringify(toolCall.function.arguments ?? {}, null, 2)
+);
+
+const toolStart = performance.now();
+
       try {
         result = await executeTool(
           toolName,
@@ -156,9 +179,15 @@ export async function responderConAgente(
         };
       }
 
-      console.log("\n[TOOL RESPONSE]");
-      console.log(toolName);
-      console.log(result);
+const toolElapsed = performance.now() - toolStart;
+
+console.log(
+  `\n[TOOL RESPONSE] ${toolName}: ${toolElapsed.toFixed(0)} ms`
+);
+
+console.log(
+  JSON.stringify(result, null, 2)
+);
 
       messages.push({
         role: "tool",
