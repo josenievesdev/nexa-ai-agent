@@ -5,7 +5,9 @@ import { executeTool, toolDefinitions } from "../tools/index.js";
 const OLLAMA_HOST =
   process.env.OLLAMA_HOST?.replace(/\/$/, "") ?? "http://127.0.0.1:11434";
 
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen3.5:4b";
+const OLLAMA_MODEL =
+  process.env.OLLAMA_MODEL ??
+  "ministral-3:14b-instruct-2512-q4_K_M";
 
 type Message = {
   role: "system" | "user" | "assistant" | "tool";
@@ -23,11 +25,27 @@ type ToolCall = {
 };
 
 type OllamaResponse = {
+  model?: string;
+  created_at?: string;
+
   message?: {
     role?: string;
     content?: string;
     tool_calls?: ToolCall[];
   };
+
+  done?: boolean;
+  done_reason?: string;
+
+  total_duration?: number;
+  load_duration?: number;
+
+  prompt_eval_count?: number;
+  prompt_eval_duration?: number;
+
+  eval_count?: number;
+  eval_duration?: number;
+
   error?: string;
 };
 
@@ -48,7 +66,7 @@ REGLAS:
 - Los resultados de las herramientas son la fuente de verdad para los datos empresariales.
 - Si todavía no tienes mediante una herramienta los datos necesarios para contestar, utiliza la herramienta correspondiente antes de generar la respuesta final.
 - Nunca supongas un producto_id.
-- Cuando el usuario mencione un producto por nombre, - Cuando el usuario mencione un producto por nombre y todavía no conoces su producto_id obtenido mediante herramientas, usa buscar_producto antes de cualquier herramienta que requiera producto_id. usa buscar_producto primero.
+- Cuando el usuario mencione un producto por nombre y todavía no conoces su producto_id obtenido mediante herramientas, usa buscar_producto antes de cualquier herramienta que requiera producto_id.
 - Si buscar_producto devuelve varias presentaciones y la petición no permite saber cuál quiere el usuario, pide una aclaración breve.
 - Si el usuario especifica concentración o presentación, elige únicamente el resultado que coincida con ella.
 - Para saber dónde está un producto usa consultar_ubicacion.
@@ -66,12 +84,46 @@ REGLAS:
 - No agregues elementos que no aparezcan en los resultados de las herramientas.
 `.trim();
 
+function logOllamaResponse(response: OllamaResponse) {
+  const content = response.message?.content ?? "";
+  const toolCalls = response.message?.tool_calls ?? [];
+
+  console.log("\n[OLLAMA RESPONSE]");
+
+  console.log(
+    JSON.stringify(
+      {
+        model: response.model,
+        done: response.done,
+        done_reason: response.done_reason,
+
+        content_length: content.length,
+        content_preview:
+          content.length > 500
+            ? `${content.slice(0, 500)}...`
+            : content,
+
+        tool_calls: toolCalls,
+
+        prompt_eval_count: response.prompt_eval_count,
+        eval_count: response.eval_count,
+
+        total_duration: response.total_duration,
+      },
+      null,
+      2
+    )
+  );
+}
+
 async function callOllama(messages: Message[]): Promise<OllamaResponse> {
   const response = await fetch(`${OLLAMA_HOST}/api/chat`, {
     method: "POST",
+
     headers: {
       "content-type": "application/json",
     },
+
     body: JSON.stringify({
       model: OLLAMA_MODEL,
       messages,
@@ -81,22 +133,42 @@ async function callOllama(messages: Message[]): Promise<OllamaResponse> {
     }),
   });
 
+  const rawText = await response.text();
+
   if (!response.ok) {
-    const text = await response.text();
+    console.error("\n[OLLAMA HTTP ERROR]");
+    console.error(`Status: ${response.status}`);
+    console.error(rawText || response.statusText);
 
     throw new Error(
-      `Ollama respondió HTTP ${response.status}: ${text || response.statusText}`
+      `Ollama respondió HTTP ${response.status}: ${
+        rawText || response.statusText
+      }`
     );
   }
 
-  return (await response.json()) as OllamaResponse;
+  let parsed: OllamaResponse;
+
+  try {
+    parsed = JSON.parse(rawText) as OllamaResponse;
+  } catch {
+    console.error("\n[OLLAMA INVALID JSON]");
+    console.error(rawText);
+
+    throw new Error(
+      "Ollama respondió correctamente por HTTP, pero la respuesta no era JSON válido."
+    );
+  }
+
+  logOllamaResponse(parsed);
+
+  return parsed;
 }
 
 export async function responderConAgente(
   userText: string,
   history: Message[] = []
 ): Promise<{ text: string; history: Message[] }> {
-
   console.log("\n[USER]");
   console.log(userText);
 
@@ -114,16 +186,16 @@ export async function responderConAgente(
     },
   ];
 
-for (let iteration = 0; iteration < 8; iteration++) {
-  const modelStart = performance.now();
+  for (let iteration = 0; iteration < 8; iteration++) {
+    const modelStart = performance.now();
 
-  const response = await callOllama(messages);
+    const response = await callOllama(messages);
 
-  const modelElapsed = performance.now() - modelStart;
+    const modelElapsed = performance.now() - modelStart;
 
-  console.log(
-    `\n[MODEL] Iteración ${iteration + 1}: ${modelElapsed.toFixed(0)} ms`
-  );
+    console.log(
+      `\n[MODEL] Iteración ${iteration + 1}: ${modelElapsed.toFixed(0)} ms`
+    );
 
     if (response.error) {
       throw new Error(response.error);
@@ -135,67 +207,127 @@ for (let iteration = 0; iteration < 8; iteration++) {
       throw new Error("Ollama no devolvió un mensaje.");
     }
 
+    const content = assistantMessage.content?.trim() ?? "";
     const toolCalls = assistantMessage.tool_calls ?? [];
 
-    messages.push({
-      role: "assistant",
-      content: assistantMessage.content ?? "",
-      tool_calls: toolCalls,
-    });
+    /*
+     * IMPORTANTE:
+     *
+     * Antes NEXA convertía:
+     *
+     * content vacío + 0 tool_calls
+     *
+     * en:
+     *
+     * "Sin respuesta."
+     *
+     * Eso ocultaba errores reales de integración y además podía
+     * contaminar el historial.
+     *
+     * Ahora lo consideramos una anomalía explícita.
+     */
+    if (toolCalls.length === 0 && content.length === 0) {
+      throw new Error(
+        "Ollama devolvió una respuesta vacía sin tool_calls. " +
+          "La respuesta NO fue guardada en el historial."
+      );
+    }
 
+    /*
+     * Si existen tool calls, sí necesitamos guardar el mensaje
+     * del assistant porque forma parte del protocolo de tools
+     * que se enviará nuevamente a Ollama.
+     */
+    if (toolCalls.length > 0) {
+      messages.push({
+        role: "assistant",
+        content: assistantMessage.content ?? "",
+        tool_calls: toolCalls,
+      });
+    }
+
+    /*
+     * No hay tool calls y sí existe contenido:
+     * tenemos una respuesta final válida.
+     */
     if (toolCalls.length === 0) {
-      const text = assistantMessage.content?.trim() || "Sin respuesta.";
+      const totalElapsed = performance.now() - requestStart;
 
-const totalElapsed = performance.now() - requestStart;
+      console.log(
+        `\n[REQUEST COMPLETE] ${totalElapsed.toFixed(0)} ms`
+      );
 
-console.log(
-  `\n[REQUEST COMPLETE] ${totalElapsed.toFixed(0)} ms`
-);
+      messages.push({
+        role: "assistant",
+        content,
+      });
 
-const cleanHistory = messages
-  .slice(1)
-  .filter((message) => {
-    if (message.role === "tool") {
-      return false;
+      const cleanHistory = messages
+        .slice(1)
+        .filter((message) => {
+          /*
+           * Nunca persistimos resultados internos de tools.
+           */
+          if (message.role === "tool") {
+            return false;
+          }
+
+          /*
+           * Tampoco persistimos mensajes intermedios del
+           * assistant que únicamente contenían tool_calls.
+           */
+          if (
+            message.role === "assistant" &&
+            message.tool_calls &&
+            message.tool_calls.length > 0
+          ) {
+            return false;
+          }
+
+          /*
+           * Y nunca guardamos mensajes assistant vacíos.
+           */
+          if (
+            message.role === "assistant" &&
+            message.content.trim().length === 0
+          ) {
+            return false;
+          }
+
+          return true;
+        });
+
+      return {
+        text: content,
+        history: cleanHistory,
+      };
     }
 
-    if (
-      message.role === "assistant" &&
-      message.tool_calls &&
-      message.tool_calls.length > 0
-    ) {
-      return false;
-    }
-
-    return true;
-  });
-
-return {
-  text,
-  history: cleanHistory,
-};
-    }
-
+    /*
+     * Ejecutamos las herramientas solicitadas.
+     */
     for (const toolCall of toolCalls) {
       const toolName = toolCall.function?.name;
 
       if (!toolName) {
-        continue;
-      }
-
-      let result: unknown;
-
-      if (!toolName) {
-      continue;
+        throw new Error(
+          "Ollama devolvió un tool_call sin nombre de herramienta."
+        );
       }
 
       console.log(`\n[TOOL REQUEST] ${toolName}`);
 
-console.log(
-  JSON.stringify(toolCall.function.arguments ?? {}, null, 2)
-);
+      console.log(
+        JSON.stringify(
+          toolCall.function.arguments ?? {},
+          null,
+          2
+        )
+      );
 
-const toolStart = performance.now();
+      const toolStart = performance.now();
+
+      let result: unknown;
 
       try {
         result = await executeTool(
@@ -211,15 +343,15 @@ const toolStart = performance.now();
         };
       }
 
-const toolElapsed = performance.now() - toolStart;
+      const toolElapsed = performance.now() - toolStart;
 
-console.log(
-  `\n[TOOL RESPONSE] ${toolName}: ${toolElapsed.toFixed(0)} ms`
-);
+      console.log(
+        `\n[TOOL RESPONSE] ${toolName}: ${toolElapsed.toFixed(0)} ms`
+      );
 
-console.log(
-  JSON.stringify(result, null, 2)
-);
+      console.log(
+        JSON.stringify(result, null, 2)
+      );
 
       messages.push({
         role: "tool",
