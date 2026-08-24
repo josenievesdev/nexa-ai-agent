@@ -7,6 +7,7 @@ export type ListarStockBajoArgs = {
 
 export async function listarStockBajo(args: ListarStockBajoArgs) {
   const sucursal = args.sucursal?.trim() || null;
+
   const limite = Math.max(
     1,
     Math.min(50, Math.floor(Number(args.limite ?? 15)))
@@ -17,15 +18,16 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
       select
         producto_id,
         sku,
+        codigo_barras,
         nombre_generico,
         nombre_comercial,
         concentracion,
+        forma_farmaceutica,
         presentacion,
         sucursal,
         stock_disponible,
         stock_minimo,
-        punto_reorden,
-        stock_maximo
+        punto_reorden
       from vw_productos_stock_bajo
       where lower(sucursal) = lower(${sucursal})
       order by
@@ -39,15 +41,16 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
     select
       producto_id,
       sku,
+      codigo_barras,
       nombre_generico,
       nombre_comercial,
       concentracion,
+      forma_farmaceutica,
       presentacion,
       sucursal,
       stock_disponible,
       stock_minimo,
-      punto_reorden,
-      stock_maximo
+      punto_reorden
     from vw_productos_stock_bajo
     order by
       stock_disponible asc,
