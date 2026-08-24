@@ -60,6 +60,10 @@ REGLAS:
 - Si una herramienta devuelve un arreglo vacío, explica que no se encontraron datos.
 - No menciones nombres internos de herramientas, SQL, IDs internos ni detalles técnicos salvo que el usuario los pida.
 - Sé breve, claro y útil.
+- Cuando una herramienta devuelve una lista y el usuario solicita la lista completa, incluye todos los resultados recibidos.
+- No omitas resultados de una herramienta sin indicarlo explícitamente.
+- Si decides resumir una lista larga, indica cuántos resultados existen en total y cuántos estás mostrando.
+- No agregues elementos que no aparezcan en los resultados de las herramientas.
 `.trim();
 
 async function callOllama(messages: Message[]): Promise<OllamaResponse> {
