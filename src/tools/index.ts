@@ -56,7 +56,7 @@ export const toolDefinitions = [
     function: {
       name: "consultar_stock",
       description:
-        "Consulta el stock de un producto ya identificado. Puede devolver el stock por todas las sucursales o limitarlo a una sucursal.",
+        "Consulta el stock de un producto ya identificado, por todas las sucursales o limitado a una. Devuelve producto (identidad, una sola vez), resumen con stock_disponible_total ya sumado, y sucursales. La cifra que responde a cuánto hay es stock_disponible; el resto de cifras está en detalle y no debe citarse como stock disponible.",
       parameters: {
         type: "object",
         properties: {
@@ -79,7 +79,7 @@ export const toolDefinitions = [
     function: {
       name: "consultar_ubicacion",
       description:
-        "Obtiene las ubicaciones físicas con stock disponible de un producto ya identificado: sucursal, bodega, pasillo, estante, nivel y lote.",
+        "Obtiene las ubicaciones físicas con stock disponible de un producto ya identificado: sucursal, bodega, pasillo, estante, nivel y lote. Devuelve producto, resumen con los totales del filtro completo, paginacion y la lista ubicaciones de la página actual. Las fechas ya vienen en formato YYYY-MM-DD.",
       parameters: {
         type: "object",
         properties: {
@@ -92,6 +92,11 @@ export const toolDefinitions = [
             description:
               "Sucursal a consultar si el usuario la especificó.",
           },
+          offset: {
+            type: ["integer", "null"],
+            description:
+              "Ubicaciones a omitir para pedir la siguiente página. Usa paginacion.siguiente_offset. Por defecto 0.",
+          },
         },
         required: ["producto_id"],
       },
@@ -102,7 +107,7 @@ export const toolDefinitions = [
     function: {
       name: "consultar_lotes",
       description:
-        "Consulta los lotes de un producto ya identificado, incluyendo fecha de vencimiento, días para vencer, ubicación, estado y cantidad.",
+        "Consulta los lotes de un producto ya identificado: vencimiento, días para vencer, ubicación, estado y cantidad. Devuelve producto, resumen con los totales del filtro completo y el próximo vencimiento ya calculado, paginacion y la lista lotes de la página actual. Usa el resumen para cualquier cifra agregada en lugar de deducirla. Las fechas ya vienen en formato YYYY-MM-DD.",
       parameters: {
         type: "object",
         properties: {
@@ -118,6 +123,11 @@ export const toolDefinitions = [
             type: ["integer", "null"],
             description:
               "Si se especifica, limita a lotes que vencen entre hoy y esa cantidad de días.",
+          },
+          offset: {
+            type: ["integer", "null"],
+            description:
+              "Lotes a omitir para pedir la siguiente página. Usa paginacion.siguiente_offset. Por defecto 0.",
           },
         },
         required: ["producto_id"],
