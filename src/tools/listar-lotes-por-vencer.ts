@@ -1,4 +1,5 @@
 import { sql } from "../database/db.js";
+import { enteroAcotado } from "./utilidades.js";
 
 export type ListarLotesPorVencerArgs = {
   dias?: number | null;
@@ -39,29 +40,6 @@ type FilaLote = {
   dias_para_vencer: number;
   cantidad: number;
 };
-
-/*
- * El modelo envía a veces cadenas, null o valores fuera de rango.
- * Number(null) es 0, así que no basta con Number().
- */
-function enteroAcotado(
-  valor: unknown,
-  porDefecto: number,
-  minimo: number,
-  maximo: number
-): number {
-  if (valor === null || valor === undefined || valor === "") {
-    return porDefecto;
-  }
-
-  const numero = Number(valor);
-
-  if (!Number.isFinite(numero)) {
-    return porDefecto;
-  }
-
-  return Math.min(maximo, Math.max(minimo, Math.floor(numero)));
-}
 
 /*
  * Devuelve un objeto con tres partes:
