@@ -27,6 +27,35 @@ const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 6144);
 
 const MAX_HISTORY_MESSAGES = 12;
 
+/*
+ * Contar mensajes no acota nada: una sola respuesta del caso de
+ * lotes ocupó 729 tokens, así que doce mensajes de ese tamaño son
+ * ~8 700 tokens contra un num_ctx de 6 144. Ollama recorta en
+ * silencio desde el principio del prompt, que es justo donde está
+ * el system prompt, y el agente pierde sus reglas sin enterarse.
+ *
+ * El presupuesto se deriva del contexto declarado para que baje
+ * solo si alguien baja OLLAMA_NUM_CTX. Una cuarta parte deja
+ * espacio al system prompt (~1 040 tok), a las definiciones de
+ * herramientas (~1 289 tok), al resultado de las herramientas del
+ * turno y a la generación.
+ */
+const HISTORY_TOKEN_BUDGET = Math.max(
+  400,
+  Math.floor(OLLAMA_NUM_CTX * 0.25)
+);
+
+/*
+ * Aproximación deliberadamente conservadora para español: contar
+ * tokens de verdad exigiría el tokenizador del modelo, y aquí solo
+ * necesitamos un techo.
+ */
+const CARACTERES_POR_TOKEN = 3.5;
+
+const MAX_HISTORY_CHARS = Math.floor(
+  HISTORY_TOKEN_BUDGET * CARACTERES_POR_TOKEN
+);
+
 const OLLAMA_MAX_ATTEMPTS = 2;
 const OLLAMA_RETRY_DELAY_MS = 500;
 
@@ -307,7 +336,7 @@ function dedupeToolCalls(toolCalls: ToolCall[]): ToolCall[] {
       continue;
     }
 
-    const key = `${name}:${JSON.stringify(toolCall.function.arguments ?? {})}`;
+    const key = claveDeHerramienta(name, toolCall.function.arguments);
 
     if (seen.has(key)) {
       console.warn(
@@ -412,20 +441,58 @@ export function looksLikeMalformedToolCall(content: string): boolean {
  * del assistant sin su pregunta.
  */
 function limitHistory(history: Message[]): Message[] {
-  if (history.length <= MAX_HISTORY_MESSAGES) {
-    return history;
+  const conservados: Message[] = [];
+  let caracteres = 0;
+
+  /*
+   * Recorremos del mensaje más reciente hacia atrás. El más
+   * reciente entra siempre: dejar el turno sin su propia respuesta
+   * rompe la conversación más de lo que ahorra.
+   */
+  for (let indice = history.length - 1; indice >= 0; indice--) {
+    const mensaje = history[indice];
+
+    if (conservados.length >= MAX_HISTORY_MESSAGES) {
+      break;
+    }
+
+    if (
+      conservados.length > 0 &&
+      caracteres + mensaje.content.length > MAX_HISTORY_CHARS
+    ) {
+      break;
+    }
+
+    conservados.unshift(mensaje);
+    caracteres += mensaje.content.length;
   }
 
-  const trimmed = history.slice(-MAX_HISTORY_MESSAGES);
-  const firstUserIndex = trimmed.findIndex(
-    (message) => message.role === "user"
+  /*
+   * Siempre empezamos en un mensaje de usuario para no dejar una
+   * respuesta del assistant sin la pregunta que la originó.
+   */
+  const primerUsuario = conservados.findIndex(
+    (mensaje) => mensaje.role === "user"
   );
 
-  if (firstUserIndex <= 0) {
-    return trimmed;
+  const resultado =
+    primerUsuario > 0 ? conservados.slice(primerUsuario) : conservados;
+
+  if (resultado.length < history.length) {
+    const conservadosChars = resultado.reduce(
+      (suma, mensaje) => suma + mensaje.content.length,
+      0
+    );
+
+    console.log(
+      `\n[HISTORY TRIM] ${history.length} → ${resultado.length} mensajes, ` +
+        `${conservadosChars} caracteres (~${Math.round(
+          conservadosChars / CARACTERES_POR_TOKEN
+        )} tok, presupuesto ${HISTORY_TOKEN_BUDGET} tok)`
+    );
   }
 
-  return trimmed.slice(firstUserIndex);
+  return resultado;
 }
 
 /*
@@ -602,6 +669,69 @@ function formatearTelemetriaTurno(turno: TelemetriaTurno): string {
   ].join(" | ");
 }
 
+/*
+ * La clave debe identificar la consulta, no su redacción. El
+ * modelo alterna entre {producto_id: 6} y {producto_id: 6,
+ * sucursal: null}, y entre "Centro" y "centro": con
+ * JSON.stringify crudo eso son llamadas distintas y el caché no
+ * atrapa nada.
+ *
+ * Normalizamos como ya hace el SQL: sin campos vacíos, claves
+ * ordenadas y texto comparado sin mayúsculas ni espacios.
+ */
+function claveDeHerramienta(nombre: string, argumentos: unknown): string {
+  const args =
+    argumentos && typeof argumentos === "object" && !Array.isArray(argumentos)
+      ? (argumentos as JsonObject)
+      : {};
+
+  const normalizados = Object.entries(args)
+    .filter(
+      ([, valor]) => valor !== null && valor !== undefined && valor !== ""
+    )
+    .map(
+      ([clave, valor]) =>
+        [
+          clave,
+          typeof valor === "string" ? valor.trim().toLowerCase() : valor,
+        ] as const
+    )
+    .sort(([primera], [segunda]) => primera.localeCompare(segunda));
+
+  return `${nombre}:${JSON.stringify(normalizados)}`;
+}
+
+/*
+ * Reusar el resultado en silencio evitaría la consulta repetida
+ * pero no el bucle: el modelo volvería a pedir lo mismo. El aviso
+ * va dentro del payload porque es donde este modelo sí atiende las
+ * instrucciones, como ya se comprobó con siguiente_paso.
+ */
+const AVISO_HERRAMIENTA_REPETIDA =
+  "Ya ejecutaste esta herramienta con estos mismos argumentos en este turno. " +
+  "No vuelvas a llamarla: responde ahora usando este resultado.";
+
+function conAvisoDeRepeticion(resultado: unknown): JsonObject {
+  if (Array.isArray(resultado)) {
+    return {
+      aviso: AVISO_HERRAMIENTA_REPETIDA,
+      resultados: resultado,
+    };
+  }
+
+  if (resultado && typeof resultado === "object") {
+    return {
+      aviso: AVISO_HERRAMIENTA_REPETIDA,
+      ...(resultado as JsonObject),
+    };
+  }
+
+  return {
+    aviso: AVISO_HERRAMIENTA_REPETIDA,
+    resultado,
+  };
+}
+
 function logOllamaResponse(response: OllamaResponse) {
   const content = response.message?.content ?? "";
   const toolCalls = response.message?.tool_calls ?? [];
@@ -635,15 +765,36 @@ function logOllamaResponse(response: OllamaResponse) {
   console.log(`\n[OLLAMA TELEMETRY] ${formatearTelemetria(telemetria)}`);
 }
 
+/*
+ * Reenviar la misma petición ante done_reason: "length" no cambia
+ * nada. En la corrida donde ocurrió, el modelo generó exactamente
+ * 789 tokens las dos veces: el reintento solo duplicó la espera.
+ *
+ * El segundo intento cambia la petición, no solo la repite.
+ */
+const INSTRUCCION_BREVEDAD = [
+  "La respuesta anterior se cortó por límite de tokens.",
+  "Responde ahora de forma mucho más breve.",
+  "Usa los totales del campo resumen de las herramientas en lugar de enumerar registros.",
+  "No reproduzcas tablas ni listas largas y no repitas datos ya entregados.",
+  "Máximo diez líneas.",
+].join(" ");
+
 async function callOllama(messages: Message[]): Promise<OllamaResponse> {
   let sawTruncatedResponse = false;
+  let pedirBrevedad = false;
 
   for (let attempt = 1; attempt <= OLLAMA_MAX_ATTEMPTS; attempt++) {
     if (attempt > 1) {
       console.log(
-        `\n[OLLAMA RETRY] Intento ${attempt}/${OLLAMA_MAX_ATTEMPTS}`
+        `\n[OLLAMA RETRY] Intento ${attempt}/${OLLAMA_MAX_ATTEMPTS}` +
+          (pedirBrevedad ? " con instrucción de brevedad" : "")
       );
     }
+
+    const mensajesEnviados: Message[] = pedirBrevedad
+      ? [...messages, { role: "system", content: INSTRUCCION_BREVEDAD }]
+      : messages;
 
     /*
      * El controlador cubre la petición y también la lectura del
@@ -669,7 +820,7 @@ async function callOllama(messages: Message[]): Promise<OllamaResponse> {
 
         body: JSON.stringify({
           model: OLLAMA_MODEL,
-          messages,
+          messages: mensajesEnviados,
           tools: toolDefinitions,
           stream: false,
           think: false,
@@ -772,15 +923,27 @@ async function callOllama(messages: Message[]): Promise<OllamaResponse> {
     );
 
     if (attempt < OLLAMA_MAX_ATTEMPTS) {
-      console.warn(`Reintentando en ${OLLAMA_RETRY_DELAY_MS} ms...`);
+      if (truncatedResponse) {
+        pedirBrevedad = true;
+
+        console.warn(
+          `Reintentando en ${OLLAMA_RETRY_DELAY_MS} ms con instrucción de brevedad ` +
+            "en lugar de repetir la misma petición..."
+        );
+      } else {
+        console.warn(`Reintentando en ${OLLAMA_RETRY_DELAY_MS} ms...`);
+      }
+
       await sleep(OLLAMA_RETRY_DELAY_MS);
       continue;
     }
 
     if (sawTruncatedResponse) {
       throw new Error(
-        `Ollama truncó la respuesta por límite de tokens después de ${OLLAMA_MAX_ATTEMPTS} intentos. ` +
-          "La respuesta incompleta NO fue procesada ni guardada en el historial."
+        `Ollama truncó la respuesta por límite de tokens en los ${OLLAMA_MAX_ATTEMPTS} intentos, ` +
+          "incluso pidiendo una respuesta más breve. " +
+          "La respuesta incompleta NO fue procesada ni guardada en el historial. " +
+          `Reduce el volumen de datos de la consulta o sube OLLAMA_NUM_CTX (actual: ${OLLAMA_NUM_CTX}).`
       );
     }
 
@@ -802,6 +965,12 @@ export async function responderConAgente(
 
   const requestStart = performance.now();
   const telemetriaTurno = nuevaTelemetriaTurno();
+
+  /*
+   * Vive un solo turno a propósito: entre turnos los datos pueden
+   * haber cambiado y reusarlos sería contaminar el contexto.
+   */
+  const cacheHerramientas = new Map<string, unknown>();
 
   const messages: Message[] = [
     {
@@ -999,6 +1168,33 @@ export async function responderConAgente(
         )
       );
 
+      const clave = claveDeHerramienta(
+        toolName,
+        toolCall.function.arguments
+      );
+
+      /*
+       * La deduplicación solo cubría un mismo mensaje del modelo.
+       * Entre iteraciones, repetir la llamada volvía a consultar
+       * PostgreSQL y a pagar otra llamada al modelo, hasta agotar
+       * las ocho iteraciones.
+       */
+      if (cacheHerramientas.has(clave)) {
+        console.warn(
+          `\n[TOOL CACHE HIT] ${toolName}: se reutiliza el resultado ya obtenido en este turno.`
+        );
+
+        messages.push({
+          role: "tool",
+          tool_name: toolName,
+          content: JSON.stringify(
+            conAvisoDeRepeticion(cacheHerramientas.get(clave))
+          ),
+        });
+
+        continue;
+      }
+
       const toolStart = performance.now();
 
       let result: unknown;
@@ -1018,6 +1214,8 @@ export async function responderConAgente(
       }
 
       const toolElapsed = performance.now() - toolStart;
+
+      cacheHerramientas.set(clave, result);
 
       console.log(
         `\n[TOOL RESPONSE] ${toolName}: ${toolElapsed.toFixed(0)} ms`

@@ -17,12 +17,19 @@ import { sql } from "../database/db.js";
 
 type Caso = {
   id: string;
-  pregunta: string;
+
+  /*
+   * Una cadena es un turno suelto. Un arreglo es una conversación:
+   * los turnos se encadenan arrastrando el historial, que es la
+   * única forma de ejercitar el recorte por presupuesto.
+   */
+  pregunta: string | string[];
 
   /*
    * Herramientas que la respuesta necesita haber ejecutado para
    * ser correcta. Si falta alguna, el caso falla aunque el modelo
-   * haya redactado algo verosímil.
+   * haya redactado algo verosímil. En una conversación se aplica
+   * al último turno.
    */
   herramientasEsperadas: string[];
 };
@@ -88,6 +95,21 @@ const CASOS: Caso[] = [
     pregunta: "Busca el producto MED-9999",
     herramientasEsperadas: ["buscar_producto"],
   },
+  {
+    /*
+     * Encadena respuestas largas a propósito: es el único caso que
+     * ejercita el recorte del historial por presupuesto y obliga
+     * al agente a reconsultar en vez de citar su propia prosa.
+     */
+    id: "conversacion",
+    pregunta: [
+      "¿Qué lotes vencen en los próximos 30 días?",
+      "¿Qué productos tienen stock bajo?",
+      "¿Cuáles son los productos más vendidos?",
+      "¿Y cuánto stock hay de ibuprofeno?",
+    ],
+    herramientasEsperadas: ["buscar_producto", "consultar_stock"],
+  },
 ];
 
 type Resultado = {
@@ -110,7 +132,7 @@ const REQUEST_TELEMETRY = /\[REQUEST TELEMETRY\] (.+)/;
  * modo verbose además lo dejamos pasar a la terminal.
  */
 async function ejecutarCapturando(
-  pregunta: string,
+  turnos: string[],
   verbose: boolean
 ): Promise<{ texto: string; salida: string; error: string | null }> {
   const original = process.stdout.write.bind(process.stdout);
@@ -127,10 +149,18 @@ async function ejecutarCapturando(
   }) as typeof process.stdout.write;
 
   try {
-    const respuesta = await responderConAgente(pregunta, []);
+    let history: any[] = [];
+    let texto = "";
+
+    for (const turno of turnos) {
+      const respuesta = await responderConAgente(turno, history);
+
+      history = respuesta.history;
+      texto = respuesta.text;
+    }
 
     return {
-      texto: respuesta.text,
+      texto,
       salida: partes.join(""),
       error: null,
     };
@@ -158,13 +188,20 @@ function herramientasDe(salida: string): string[] {
 async function correrCaso(caso: Caso, verbose: boolean): Promise<Resultado> {
   const inicio = performance.now();
 
-  const { texto, salida, error } = await ejecutarCapturando(
-    caso.pregunta,
-    verbose
-  );
+  const turnos = Array.isArray(caso.pregunta)
+    ? caso.pregunta
+    : [caso.pregunta];
+
+  const { texto, salida, error } = await ejecutarCapturando(turnos, verbose);
 
   const ms = performance.now() - inicio;
-  const herramientas = herramientasDe(salida);
+
+  /*
+   * En una conversación solo interesan las herramientas del último
+   * turno: las de los turnos previos ya se dieron por buenas.
+   */
+  const segmentos = salida.split("\n[USER]\n");
+  const herramientas = herramientasDe(segmentos[segmentos.length - 1]);
 
   const faltantes = caso.herramientasEsperadas.filter(
     (nombre) => !herramientas.includes(nombre)
@@ -190,7 +227,13 @@ function imprimirResultado(resultado: Resultado, indice: number, total: number) 
       `(${(resultado.ms / 1000).toFixed(1)}s)`
   );
 
-  console.log(`  Pregunta:    ${resultado.caso.pregunta}`);
+  console.log(
+    `  Pregunta:    ${
+      Array.isArray(resultado.caso.pregunta)
+        ? resultado.caso.pregunta.join("  →  ")
+        : resultado.caso.pregunta
+    }`
+  );
 
   console.log(
     `  Tools:       ${
