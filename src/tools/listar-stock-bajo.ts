@@ -20,9 +20,12 @@ const LIMITE_MINIMO = 10;
 const LIMITE_MAXIMO = 50;
 
 type FilaResumen = {
-  total: number;
+  registros: number;
   productos_distintos: number;
   sin_stock: number;
+  con_stock: number;
+  stock_minimo: number | null;
+  en_el_minimo: number;
   unidades_para_reponer: number;
 };
 
@@ -50,9 +53,11 @@ type FilaProducto = {
  * filtro, no sobre la página: así el modelo nunca puede presentar
  * una lista parcial como si fuera el inventario completo.
  *
- * La vista es por producto y sucursal, de modo que `total` cuenta
- * combinaciones producto-sucursal y `productos_distintos` cuenta
- * productos.
+ * La vista es por producto y sucursal, de modo que `registros`
+ * cuenta combinaciones producto-sucursal y `productos_distintos`
+ * cuenta productos. Los nombres importan: con el campo llamado
+ * `total` el modelo leyó `productos_distintos` como "los que sí
+ * tienen stock" e informó 27 donde había 26.
  */
 export async function listarStockBajo(args: ListarStockBajoArgs) {
   const limite = enteroAcotado(
@@ -72,13 +77,36 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
 
   const [resumen, porSucursal, productos] = await Promise.all([
     sql<FilaResumen[]>`
+      with filtradas as (
+        select *
+        from vw_productos_stock_bajo
+        where true
+          ${filtroSucursal}
+      )
       select
-        count(*)::int as total,
+        count(*)::int as registros,
         count(distinct producto_id)::int as productos_distintos,
 
         count(*) filter (
           where stock_disponible = 0
         )::int as sin_stock,
+
+        count(*) filter (
+          where stock_disponible > 0
+        )::int as con_stock,
+
+        min(stock_disponible)::int as stock_minimo,
+
+        /*
+         * Cuántas filas comparten el stock más bajo. Sin este
+         * número el modelo corona un ganador único donde hay
+         * empate, que es el modo de falla de C2.
+         */
+        count(*) filter (
+          where stock_disponible = (
+            select min(stock_disponible) from filtradas
+          )
+        )::int as en_el_minimo,
 
         coalesce(
           sum(
@@ -87,9 +115,7 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
           0
         )::int as unidades_para_reponer
 
-      from vw_productos_stock_bajo
-      where true
-        ${filtroSucursal}
+      from filtradas
     `,
 
     sql<FilaSucursal[]>`
@@ -148,20 +174,41 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
 
   const totales = resumen[0];
 
-  const total = totales?.total ?? 0;
+  const total = totales?.registros ?? 0;
   const mostrados = productos.length;
   const hayMas = offset + mostrados < total;
+
+  const stockMinimo = totales?.stock_minimo ?? null;
+  const enElMinimo = totales?.en_el_minimo ?? 0;
+
+  /*
+   * El modelo deduce el mínimo leyendo las filas y se equivoca:
+   * con nueve productos en cero llegó a nombrar uno con una
+   * unidad. Las reglas del prompt no corrigieron eso; la
+   * instrucción dentro del resultado sí, como ya ocurrió con
+   * siguiente_paso en buscar_producto.
+   */
+  const nota =
+    stockMinimo !== null && enElMinimo > 1
+      ? `Hay ${enElMinimo} registros empatados en el stock más bajo (${stockMinimo} unidades). ` +
+        "Está prohibido nombrar un único producto con menos stock: preséntalo como empate e indica cuántos son."
+      : null;
 
   return {
     consulta: {
       sucursal: sucursal ?? "todas",
     },
 
+    ...(nota ? { nota } : {}),
+
     resumen: {
-      total,
-      mostrados,
+      registros: total,
       productos_distintos: totales?.productos_distintos ?? 0,
+      mostrados,
       sin_stock: totales?.sin_stock ?? 0,
+      con_stock: totales?.con_stock ?? 0,
+      stock_minimo: stockMinimo,
+      productos_en_el_minimo: enElMinimo,
       unidades_para_reponer: totales?.unidades_para_reponer ?? 0,
       por_sucursal: [...porSucursal],
     },

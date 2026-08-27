@@ -129,7 +129,7 @@ export const toolDefinitions = [
     function: {
       name: "listar_stock_bajo",
       description:
-        "Lista productos cuyo stock disponible está en o por debajo de su punto de reorden. Sirve para preguntas generales de reabastecimiento, faltantes y para saber qué producto tiene menos stock. Devuelve un objeto con resumen (totales sobre TODOS los productos que cumplen el filtro, incluidos cuántos están en cero), paginacion y la lista productos de la página actual. El tamaño de página lo fija la herramienta.",
+        "Lista productos cuyo stock disponible está en o por debajo de su punto de reorden. Sirve para preguntas generales de reabastecimiento, faltantes y para saber qué producto tiene menos stock. Devuelve resumen, paginacion y la lista productos de la página actual. El resumen se calcula sobre TODOS los registros que cumplen el filtro: registros cuenta combinaciones producto-sucursal, productos_distintos cuenta productos, y stock_minimo con productos_en_el_minimo dan el mínimo real y cuántos lo comparten. El tamaño de página lo fija la herramienta.",
       parameters: {
         type: "object",
         properties: {
