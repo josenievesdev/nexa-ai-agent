@@ -30,6 +30,20 @@ const MAX_HISTORY_MESSAGES = 12;
 const OLLAMA_MAX_ATTEMPTS = 2;
 const OLLAMA_RETRY_DELAY_MS = 500;
 
+/*
+ * Sin límite de tiempo, un Ollama que deja de responder cuelga al
+ * agente para siempre y retiene la conexión a PostgreSQL.
+ *
+ * El valor debe ser generoso: la generación legítima más lenta
+ * medida fue de 76 s y el arranque en frío del modelo llegó a 69 s,
+ * así que un turno real puede pasar de dos minutos. 180 s deja
+ * margen sobre eso sin volver el bloqueo indefinido.
+ *
+ * No se reintenta un timeout: duplicar la espera antes de fallar
+ * empeora el peor caso sin arreglar la causa.
+ */
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 180000);
+
 type Message = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
@@ -631,27 +645,75 @@ async function callOllama(messages: Message[]): Promise<OllamaResponse> {
       );
     }
 
-    const response = await fetch(`${OLLAMA_HOST}/api/chat`, {
-      method: "POST",
+    /*
+     * El controlador cubre la petición y también la lectura del
+     * cuerpo: una conexión que se queda a medio responder es tan
+     * bloqueante como una que nunca contesta.
+     */
+    const controlador = new AbortController();
 
-      headers: {
-        "content-type": "application/json",
-      },
+    const temporizador = setTimeout(() => {
+      controlador.abort();
+    }, OLLAMA_TIMEOUT_MS);
 
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        messages,
-        tools: toolDefinitions,
-        stream: false,
-        think: false,
+    let response: Response;
+    let rawText: string;
 
-        options: {
-          num_ctx: OLLAMA_NUM_CTX,
+    try {
+      response = await fetch(`${OLLAMA_HOST}/api/chat`, {
+        method: "POST",
+
+        headers: {
+          "content-type": "application/json",
         },
-      }),
-    });
 
-    const rawText = await response.text();
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          messages,
+          tools: toolDefinitions,
+          stream: false,
+          think: false,
+
+          options: {
+            num_ctx: OLLAMA_NUM_CTX,
+          },
+        }),
+
+        signal: controlador.signal,
+      });
+
+      rawText = await response.text();
+    } catch (error) {
+      if (controlador.signal.aborted) {
+        console.error("\n[OLLAMA TIMEOUT]");
+
+        console.error(
+          `No hubo respuesta en ${OLLAMA_TIMEOUT_MS} ms (modelo ${OLLAMA_MODEL}).`
+        );
+
+        const limite =
+          OLLAMA_TIMEOUT_MS >= 1000
+            ? `${(OLLAMA_TIMEOUT_MS / 1000).toFixed(0)} s`
+            : `${OLLAMA_TIMEOUT_MS} ms`;
+
+        throw new Error(
+          `Ollama no respondió en ${limite}. ` +
+            "Verifica que el servicio esté activo y que el modelo quepa en la GPU. " +
+            "Si el arranque en frío es legítimamente más lento, sube OLLAMA_TIMEOUT_MS."
+        );
+      }
+
+      console.error("\n[OLLAMA NETWORK ERROR]");
+      console.error(error instanceof Error ? error.message : error);
+
+      throw new Error(
+        "No fue posible comunicarse con Ollama en " +
+          `${OLLAMA_HOST}: ` +
+          (error instanceof Error ? error.message : "error desconocido.")
+      );
+    } finally {
+      clearTimeout(temporizador);
+    }
 
     if (!response.ok) {
       console.error("\n[OLLAMA HTTP ERROR]");
