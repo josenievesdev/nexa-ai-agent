@@ -9,6 +9,27 @@ const OLLAMA_MODEL =
   process.env.OLLAMA_MODEL ??
   "ministral-3:14b-instruct-2512-q4_K_M";
 
+const KNOWN_TOOL_NAMES: Set<string> = new Set(
+  toolDefinitions.map((tool) => tool.function.name)
+);
+
+/*
+ * Ollama usa num_ctx 4096 por defecto. Con este system prompt
+ * (~2000 tokens) más el esquema de herramientas y el resultado de
+ * una tool, el modelo choca contra el límite y devuelve
+ * done_reason: "length" al escribir la respuesta final.
+ *
+ * ministral-3:8b admite un contexto mucho mayor, así que lo
+ * declaramos de forma explícita. Si la VRAM de la GPU queda corta,
+ * se puede bajar con OLLAMA_NUM_CTX.
+ */
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 6144);
+
+const MAX_HISTORY_MESSAGES = 12;
+
+const OLLAMA_MAX_ATTEMPTS = 2;
+const OLLAMA_RETRY_DELAY_MS = 500;
+
 type Message = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
@@ -67,7 +88,8 @@ REGLAS:
 - Si todavía no tienes mediante una herramienta los datos necesarios para contestar, utiliza la herramienta correspondiente antes de generar la respuesta final.
 - Nunca supongas un producto_id.
 - Cuando el usuario mencione un producto por nombre y todavía no conoces su producto_id obtenido mediante herramientas, usa buscar_producto antes de cualquier herramienta que requiera producto_id.
-- Si buscar_producto devuelve varias presentaciones y la petición no permite saber cuál quiere el usuario, pide una aclaración breve.
+- Cuando la pregunta sea sobre stock, ubicación, lotes, vencimientos o ventas, buscar_producto nunca es la respuesta final: después de identificar el producto debes ejecutar la herramienta que responde esa pregunta antes de contestar.
+- Si buscar_producto devuelve varias presentaciones y el usuario no indicó cuál, ejecuta esa herramienta para cada presentación encontrada, como máximo tres, y agrupa los resultados por presentación. No pidas aclaración en ese caso.
 - Si el usuario especifica concentración o presentación, elige únicamente el resultado que coincida con ella.
 - Para saber dónde está un producto usa consultar_ubicacion.
 - Para saber cuánto hay usa consultar_stock.
@@ -82,7 +104,315 @@ REGLAS:
 - No omitas resultados de una herramienta sin indicarlo explícitamente.
 - Si decides resumir una lista larga, indica cuántos resultados existen en total y cuántos estás mostrando.
 - No agregues elementos que no aparezcan en los resultados de las herramientas.
+- Algunas herramientas devuelven un objeto con resumen, paginacion y la lista de resultados. En ese caso apóyate en el resumen para dar los totales y enumera únicamente los resultados recibidos.
+- Cuando paginacion.hay_mas sea true, indícalo al usuario y ofrece mostrar más resultados.
+- Si el usuario pide ver más resultados, vuelve a llamar la misma herramienta con offset igual a paginacion.siguiente_offset.
 `.trim();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+type JsonObject = Record<string, unknown>;
+
+/*
+ * Longitud máxima de contenido sobre la que intentamos recuperar
+ * una llamada textual. Evita escanear respuestas enormes.
+ */
+const MAX_RECOVERABLE_CONTENT_LENGTH = 20000;
+
+/*
+ * Separadores que el modelo puede escribir entre el nombre de la
+ * herramienta y su objeto JSON de argumentos:
+ *
+ *   buscar_producto{"sku":"MED-0081"}
+ *   buscar_producto [ARGS]{"sku":"MED-0081"}
+ *   buscar_producto: {"sku":"MED-0081"}
+ *   buscar_producto({"sku":"MED-0081"})
+ */
+const TOOL_ARGS_SEPARATOR = /^(?:\[ARGS\]|[\s:=(])*/;
+
+/*
+ * Lee un objeto JSON balanceado a partir de `start`.
+ *
+ * No usamos una expresión regular codiciosa porque los argumentos
+ * pueden contener llaves dentro de cadenas. Recorremos el texto
+ * contando llaves, respetando cadenas y escapes, y validamos el
+ * resultado con JSON.parse. Nunca se evalúa código.
+ */
+function readJsonObject(
+  text: string,
+  start: number
+): { raw: string; value: JsonObject } | null {
+  if (text[start] !== "{") {
+    return null;
+  }
+
+  let depth = 0;
+  let insideString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index++) {
+    const char = text[index];
+
+    if (insideString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        insideString = false;
+      }
+
+      continue;
+    }
+
+    if (char === '"') {
+      insideString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      depth++;
+      continue;
+    }
+
+    if (char !== "}") {
+      continue;
+    }
+
+    depth--;
+
+    if (depth > 0) {
+      continue;
+    }
+
+    const raw = text.slice(start, index + 1);
+
+    let parsed: unknown;
+
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+
+    return { raw, value: parsed as JsonObject };
+  }
+
+  return null;
+}
+
+/*
+ * Un nombre de herramienta solamente es válido si no está pegado a
+ * otro identificador. Sí aceptamos prefijos de espacio de nombres
+ * que algunos modelos inventan (`azienda_buscar_producto`,
+ * `functions.buscar_producto`) porque el nombre real sigue siendo
+ * exactamente el de una herramienta declarada.
+ */
+function hasValidToolNameBoundary(content: string, index: number): boolean {
+  if (index === 0) {
+    return true;
+  }
+
+  return !/[A-Za-z0-9]/.test(content[index - 1]);
+}
+
+type ToolCallCandidate = {
+  start: number;
+  end: number;
+  toolCall: ToolCall;
+};
+
+function findToolCallCandidates(content: string): ToolCallCandidate[] {
+  const candidates: ToolCallCandidate[] = [];
+
+  for (const toolName of KNOWN_TOOL_NAMES) {
+    let searchFrom = 0;
+
+    while (searchFrom < content.length) {
+      const index = content.indexOf(toolName, searchFrom);
+
+      if (index === -1) {
+        break;
+      }
+
+      const afterName = index + toolName.length;
+      searchFrom = afterName;
+
+      if (!hasValidToolNameBoundary(content, index)) {
+        continue;
+      }
+
+      const separator =
+        content.slice(afterName).match(TOOL_ARGS_SEPARATOR)?.[0] ?? "";
+
+      const jsonStart = afterName + separator.length;
+      const parsed = readJsonObject(content, jsonStart);
+
+      if (!parsed) {
+        continue;
+      }
+
+      candidates.push({
+        start: index,
+        end: jsonStart + parsed.raw.length,
+
+        toolCall: {
+          function: {
+            name: toolName,
+            arguments: parsed.value,
+          },
+        },
+      });
+    }
+  }
+
+  return candidates.sort((first, second) => first.start - second.start);
+}
+
+function dedupeToolCalls(toolCalls: ToolCall[]): ToolCall[] {
+  const seen = new Set<string>();
+  const unique: ToolCall[] = [];
+
+  for (const toolCall of toolCalls) {
+    const name = toolCall.function?.name;
+
+    if (!name) {
+      /*
+       * Lo dejamos pasar para que el flujo principal lo reporte
+       * como tool_call inválido en lugar de ocultarlo aquí.
+       */
+      unique.push(toolCall);
+      continue;
+    }
+
+    const key = `${name}:${JSON.stringify(toolCall.function.arguments ?? {})}`;
+
+    if (seen.has(key)) {
+      console.warn(
+        `\n[TOOL CALL DUPLICADO] Se descartó una llamada repetida a ${name}.`
+      );
+
+      continue;
+    }
+
+    seen.add(key);
+    unique.push(toolCall);
+  }
+
+  return unique;
+}
+
+/*
+ * Compatibilidad defensiva para casos donde el modelo escribe la
+ * llamada como texto plano y Ollama no la expone en
+ * message.tool_calls.
+ *
+ * Formatos reconocidos (con o sin texto alrededor):
+ *
+ *   listar_lotes_por_vencer[ARGS]{"dias":30}
+ *   [TOOL_CALLS]listar_lotes_por_vencer[ARGS]{"dias":30}
+ *   azienda_buscar_producto{"nombre":"ibuprofeno"}
+ *   Voy a consultar. buscar_producto: {"sku":"MED-0081"}
+ *
+ * Seguridad: el nombre debe existir en toolDefinitions y los
+ * argumentos deben ser un objeto JSON válido. Cualquier otra cosa
+ * se descarta.
+ */
+export function recoverToolCallsFromContent(content: string): ToolCall[] {
+  const trimmed = content.trim();
+
+  if (!trimmed || trimmed.length > MAX_RECOVERABLE_CONTENT_LENGTH) {
+    return [];
+  }
+
+  const candidates = findToolCallCandidates(trimmed);
+
+  const recovered: ToolCall[] = [];
+  let consumedUntil = 0;
+
+  for (const candidate of candidates) {
+    /*
+     * Ignoramos coincidencias que caen dentro de una llamada ya
+     * recuperada, por ejemplo un nombre de herramienta escrito
+     * dentro de los argumentos de otra.
+     */
+    if (candidate.start < consumedUntil) {
+      continue;
+    }
+
+    consumedUntil = candidate.end;
+    recovered.push(candidate.toolCall);
+  }
+
+  return dedupeToolCalls(recovered);
+}
+
+export function looksLikeMalformedToolCall(content: string): boolean {
+  if (content.includes("[ARGS]") || content.includes("[TOOL_CALLS]")) {
+    return true;
+  }
+
+  for (const toolName of KNOWN_TOOL_NAMES) {
+    let searchFrom = 0;
+
+    while (searchFrom < content.length) {
+      const index = content.indexOf(toolName, searchFrom);
+
+      if (index === -1) {
+        break;
+      }
+
+      const afterName = index + toolName.length;
+      searchFrom = afterName;
+
+      if (!hasValidToolNameBoundary(content, index)) {
+        continue;
+      }
+
+      const rest = content.slice(afterName).trimStart();
+
+      if (rest.startsWith("{") || rest.startsWith("(")) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/*
+ * El historial crece indefinidamente entre turnos y termina
+ * empujando al modelo contra el límite de contexto, que es una de
+ * las causas de done_reason: "length".
+ *
+ * Conservamos las últimas conversaciones completas y siempre
+ * empezamos en un mensaje de usuario para no dejar una respuesta
+ * del assistant sin su pregunta.
+ */
+function limitHistory(history: Message[]): Message[] {
+  if (history.length <= MAX_HISTORY_MESSAGES) {
+    return history;
+  }
+
+  const trimmed = history.slice(-MAX_HISTORY_MESSAGES);
+  const firstUserIndex = trimmed.findIndex(
+    (message) => message.role === "user"
+  );
+
+  if (firstUserIndex <= 0) {
+    return trimmed;
+  }
+
+  return trimmed.slice(firstUserIndex);
+}
 
 function logOllamaResponse(response: OllamaResponse) {
   const content = response.message?.content ?? "";
@@ -96,6 +426,7 @@ function logOllamaResponse(response: OllamaResponse) {
         model: response.model,
         done: response.done,
         done_reason: response.done_reason,
+        error: response.error,
 
         content_length: content.length,
         content_preview:
@@ -117,52 +448,113 @@ function logOllamaResponse(response: OllamaResponse) {
 }
 
 async function callOllama(messages: Message[]): Promise<OllamaResponse> {
-  const response = await fetch(`${OLLAMA_HOST}/api/chat`, {
-    method: "POST",
+  let sawTruncatedResponse = false;
 
-    headers: {
-      "content-type": "application/json",
-    },
+  for (let attempt = 1; attempt <= OLLAMA_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      console.log(
+        `\n[OLLAMA RETRY] Intento ${attempt}/${OLLAMA_MAX_ATTEMPTS}`
+      );
+    }
 
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      messages,
-      tools: toolDefinitions,
-      stream: false,
-      think: false,
-    }),
-  });
+    const response = await fetch(`${OLLAMA_HOST}/api/chat`, {
+      method: "POST",
 
-  const rawText = await response.text();
+      headers: {
+        "content-type": "application/json",
+      },
 
-  if (!response.ok) {
-    console.error("\n[OLLAMA HTTP ERROR]");
-    console.error(`Status: ${response.status}`);
-    console.error(rawText || response.statusText);
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages,
+        tools: toolDefinitions,
+        stream: false,
+        think: false,
+
+        options: {
+          num_ctx: OLLAMA_NUM_CTX,
+        },
+      }),
+    });
+
+    const rawText = await response.text();
+
+    if (!response.ok) {
+      console.error("\n[OLLAMA HTTP ERROR]");
+      console.error(`Status: ${response.status}`);
+      console.error(rawText || response.statusText);
+
+      throw new Error(
+        `Ollama respondió HTTP ${response.status}: ${
+          rawText || response.statusText
+        }`
+      );
+    }
+
+    let parsed: OllamaResponse;
+
+    try {
+      parsed = JSON.parse(rawText) as OllamaResponse;
+    } catch {
+      console.error("\n[OLLAMA INVALID JSON]");
+      console.error(rawText);
+
+      throw new Error(
+        "Ollama respondió correctamente por HTTP, pero la respuesta no era JSON válido."
+      );
+    }
+
+    logOllamaResponse(parsed);
+
+    /*
+     * Ollama puede responder HTTP 200 y reportar el fallo dentro
+     * del cuerpo. Si no lo propagamos aquí, el error real queda
+     * oculto detrás de "respuesta incompleta".
+     */
+    if (parsed.error) {
+      throw new Error("Ollama reportó un error: " + parsed.error);
+    }
+
+    const truncatedResponse = parsed.done_reason === "length";
+    const incompleteResponse =
+      parsed.done !== true || !parsed.message || truncatedResponse;
+
+    if (truncatedResponse) {
+      sawTruncatedResponse = true;
+    }
+
+    if (!incompleteResponse) {
+      return parsed;
+    }
+
+    console.warn("\n[OLLAMA INCOMPLETE RESPONSE]");
+    console.warn("Cuerpo recibido: " + rawText.slice(0, 500));
+    console.warn(
+      truncatedResponse
+        ? `Ollama truncó la respuesta por límite de tokens en el intento ${attempt}/${OLLAMA_MAX_ATTEMPTS}.`
+        : `Ollama devolvió una respuesta incompleta en el intento ${attempt}/${OLLAMA_MAX_ATTEMPTS}.`
+    );
+
+    if (attempt < OLLAMA_MAX_ATTEMPTS) {
+      console.warn(`Reintentando en ${OLLAMA_RETRY_DELAY_MS} ms...`);
+      await sleep(OLLAMA_RETRY_DELAY_MS);
+      continue;
+    }
+
+    if (sawTruncatedResponse) {
+      throw new Error(
+        `Ollama truncó la respuesta por límite de tokens después de ${OLLAMA_MAX_ATTEMPTS} intentos. ` +
+          "La respuesta incompleta NO fue procesada ni guardada en el historial."
+      );
+    }
 
     throw new Error(
-      `Ollama respondió HTTP ${response.status}: ${
-        rawText || response.statusText
-      }`
+      `Ollama devolvió una respuesta incompleta después de ${OLLAMA_MAX_ATTEMPTS} intentos. ` +
+        "La respuesta NO fue procesada ni guardada en el historial."
     );
   }
 
-  let parsed: OllamaResponse;
-
-  try {
-    parsed = JSON.parse(rawText) as OllamaResponse;
-  } catch {
-    console.error("\n[OLLAMA INVALID JSON]");
-    console.error(rawText);
-
-    throw new Error(
-      "Ollama respondió correctamente por HTTP, pero la respuesta no era JSON válido."
-    );
-  }
-
-  logOllamaResponse(parsed);
-
-  return parsed;
+  throw new Error("No fue posible obtener una respuesta válida de Ollama.");
 }
 
 export async function responderConAgente(
@@ -207,8 +599,47 @@ export async function responderConAgente(
       throw new Error("Ollama no devolvió un mensaje.");
     }
 
-    const content = assistantMessage.content?.trim() ?? "";
-    const toolCalls = assistantMessage.tool_calls ?? [];
+    let content = assistantMessage.content?.trim() ?? "";
+    let toolCalls = assistantMessage.tool_calls ?? [];
+
+    /*
+     * Algunos modelos con formato Mistral generan la llamada de
+     * herramienta como texto aunque Ollama no la exponga en
+     * message.tool_calls.
+     *
+     * Si dentro del contenido aparece una herramienta conocida
+     * seguida de argumentos JSON válidos, recuperamos la llamada
+     * de forma determinista.
+     */
+    if (toolCalls.length > 0) {
+      toolCalls = dedupeToolCalls(toolCalls);
+    } else if (content.length > 0) {
+      const recoveredToolCalls = recoverToolCallsFromContent(content);
+
+      if (recoveredToolCalls.length > 0) {
+        console.warn("\n[TOOL CALL RECOVERED]");
+        console.warn(
+          `Se recuperaron ${recoveredToolCalls.length} llamada(s) textual(es): ` +
+            recoveredToolCalls
+              .map((toolCall) => toolCall.function.name)
+              .join(", ")
+        );
+
+        toolCalls = recoveredToolCalls;
+
+        /*
+         * El texto que acompaña a la llamada es narración del
+         * modelo, no una respuesta final: no debe llegar al
+         * usuario ni al historial.
+         */
+        content = "";
+      } else if (looksLikeMalformedToolCall(content)) {
+        throw new Error(
+          "Ollama devolvió texto con apariencia de tool_call, pero no fue posible validarlo de forma segura. " +
+            "La respuesta NO fue mostrada al usuario ni guardada en el historial."
+        );
+      }
+    }
 
     /*
      * IMPORTANTE:
@@ -241,7 +672,7 @@ export async function responderConAgente(
     if (toolCalls.length > 0) {
       messages.push({
         role: "assistant",
-        content: assistantMessage.content ?? "",
+        content,
         tool_calls: toolCalls,
       });
     }
@@ -299,7 +730,7 @@ export async function responderConAgente(
 
       return {
         text: content,
-        history: cleanHistory,
+        history: limitHistory(cleanHistory),
       };
     }
 

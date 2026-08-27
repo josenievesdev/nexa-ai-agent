@@ -14,22 +14,40 @@ export const toolDefinitions = [
     function: {
       name: "buscar_producto",
       description:
-        "Busca productos por nombre genérico, nombre comercial, alias, SKU o texto aproximado. Debe usarse antes de otras herramientas cuando todavía no se conoce el producto_id.",
+        "Busca productos por nombre, SKU o código de barras. Usa codigo_barras cuando el usuario mencione un código de barras, sku cuando mencione un SKU y nombre únicamente cuando identifique el producto por su nombre. Nunca coloques un SKU o código de barras en nombre. Debe usarse antes de otras herramientas cuando todavía no se conoce el producto_id.",
       parameters: {
         type: "object",
         properties: {
           nombre: {
             type: "string",
+            minLength: 1,
             description:
-              "Nombre o texto con el que el usuario identifica el producto, por ejemplo ibuprofeno, paracetamol o MED-0006.",
+              "Nombre genérico, nombre comercial o alias del producto, por ejemplo ibuprofeno o paracetamol. No usar para SKU ni códigos de barras.",
+          },
+          sku: {
+            type: "string",
+            minLength: 1,
+            description:
+              "SKU empresarial del producto cuando el usuario menciona un SKU, por ejemplo MED-0006. No enviarlo en nombre.",
+          },
+          codigo_barras: {
+            type: "string",
+            minLength: 1,
+            description:
+              "Código de barras del producto cuando el usuario menciona un código de barras, por ejemplo 7709000000006. No enviarlo en nombre.",
           },
           presentacion: {
-            type: ["string", "null"],
+            type: "string",
+            minLength: 1,
             description:
               "Concentración o presentación si el usuario la especifica, por ejemplo 400 mg, 100 mg/5 mL o caja x 20.",
           },
         },
-        required: ["nombre"],
+        anyOf: [
+          { required: ["nombre"] },
+          { required: ["sku"] },
+          { required: ["codigo_barras"] },
+        ],
       },
     },
   },
@@ -132,7 +150,7 @@ export const toolDefinitions = [
     function: {
       name: "listar_lotes_por_vencer",
       description:
-        "Lista lotes de cualquier producto que vencen dentro de una cantidad de días. Úsala para preguntas generales sobre próximos vencimientos.",
+        "Lista lotes de cualquier producto que vencen dentro de una cantidad de días. Úsala para preguntas generales sobre próximos vencimientos. Devuelve un objeto con resumen (totales sobre todos los lotes que cumplen el filtro), paginacion y la lista lotes de la página actual.",
       parameters: {
         type: "object",
         properties: {
@@ -147,7 +165,13 @@ export const toolDefinitions = [
           },
           limite: {
             type: ["integer", "null"],
-            description: "Número máximo de lotes a devolver.",
+            description:
+              "Número de lotes por página. Por defecto 10 y máximo 50. Los totales del resumen siempre se calculan sobre todos los lotes, no sobre la página.",
+          },
+          offset: {
+            type: ["integer", "null"],
+            description:
+              "Número de lotes a omitir para pedir la siguiente página. Usa el valor de paginacion.siguiente_offset de la llamada anterior. Por defecto 0.",
           },
         },
       },
