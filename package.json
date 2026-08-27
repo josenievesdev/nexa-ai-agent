@@ -4,12 +4,13 @@
   "description": "Prueba de concepto de un asistente empresarial con IA local y PostgreSQL.",
   "type": "module",
   "scripts": {
-  "dev": "tsx src/index.ts",
-  "build": "tsc",
-  "start": "node dist/index.js",
-  "db:setup": "tsx src/database/setup-db.ts",
-  "db:check": "tsx src/database/check-db.ts"
-},
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:setup": "tsx src/database/setup-db.ts",
+    "db:check": "tsx src/database/check-db.ts",
+    "probar": "tsx src/scripts/probar-agente.ts"
+  },
   "dependencies": {
     "dotenv": "^17.2.2",
     "ollama": "^0.5.18",

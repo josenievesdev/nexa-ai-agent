@@ -414,9 +414,184 @@ function limitHistory(history: Message[]): Message[] {
   return trimmed.slice(firstUserIndex);
 }
 
+/*
+ * Ollama reporta las duraciones en nanosegundos y no deriva
+ * ninguna velocidad. Sin separar carga, evaluación del prompt y
+ * generación, dos consultas con tiempos muy distintos parecen
+ * inexplicables: la diferencia entre 6,7 s y 59,5 s para la misma
+ * pregunta está entera en load_duration, no en el modelo ni en la
+ * base de datos.
+ */
+const NS_POR_MS = 1_000_000;
+const NS_POR_S = 1_000_000_000;
+
+type Telemetria = {
+  total_ms: number | null;
+  carga_ms: number | null;
+  prompt_eval_ms: number | null;
+  generacion_ms: number | null;
+  overhead_ms: number | null;
+
+  prompt_tokens: number | null;
+  tokens_generados: number | null;
+
+  prompt_tokens_por_segundo: number | null;
+  tokens_por_segundo: number | null;
+};
+
+function nsAMs(nanosegundos: number | undefined): number | null {
+  if (typeof nanosegundos !== "number" || !Number.isFinite(nanosegundos)) {
+    return null;
+  }
+
+  return Math.round(nanosegundos / NS_POR_MS);
+}
+
+function porSegundo(
+  tokens: number | undefined,
+  nanosegundos: number | undefined
+): number | null {
+  if (typeof tokens !== "number" || !Number.isFinite(tokens)) {
+    return null;
+  }
+
+  if (
+    typeof nanosegundos !== "number" ||
+    !Number.isFinite(nanosegundos) ||
+    nanosegundos <= 0
+  ) {
+    return null;
+  }
+
+  return Number(((tokens * NS_POR_S) / nanosegundos).toFixed(1));
+}
+
+function extraerTelemetria(response: OllamaResponse): Telemetria {
+  const totalMs = nsAMs(response.total_duration);
+  const cargaMs = nsAMs(response.load_duration);
+  const promptEvalMs = nsAMs(response.prompt_eval_duration);
+  const generacionMs = nsAMs(response.eval_duration);
+
+  /*
+   * Lo que el total no explica: transporte, tokenización y
+   * cualquier espera fuera de las tres fases medidas.
+   */
+  const overheadMs =
+    totalMs === null ||
+    cargaMs === null ||
+    promptEvalMs === null ||
+    generacionMs === null
+      ? null
+      : Math.max(0, totalMs - cargaMs - promptEvalMs - generacionMs);
+
+  return {
+    total_ms: totalMs,
+    carga_ms: cargaMs,
+    prompt_eval_ms: promptEvalMs,
+    generacion_ms: generacionMs,
+    overhead_ms: overheadMs,
+
+    prompt_tokens: response.prompt_eval_count ?? null,
+    tokens_generados: response.eval_count ?? null,
+
+    prompt_tokens_por_segundo: porSegundo(
+      response.prompt_eval_count,
+      response.prompt_eval_duration
+    ),
+
+    tokens_por_segundo: porSegundo(
+      response.eval_count,
+      response.eval_duration
+    ),
+  };
+}
+
+function enSegundos(milisegundos: number | null): string {
+  if (milisegundos === null) {
+    return "?";
+  }
+
+  return `${(milisegundos / 1000).toFixed(1)}s`;
+}
+
+function formatearTelemetria(telemetria: Telemetria): string {
+  const prompt =
+    `prompt ${telemetria.prompt_tokens ?? "?"} tok / ` +
+    `${enSegundos(telemetria.prompt_eval_ms)} @ ` +
+    `${telemetria.prompt_tokens_por_segundo ?? "?"} tok/s`;
+
+  const generacion =
+    `generacion ${telemetria.tokens_generados ?? "?"} tok / ` +
+    `${enSegundos(telemetria.generacion_ms)} @ ` +
+    `${telemetria.tokens_por_segundo ?? "?"} tok/s`;
+
+  return [
+    `total ${enSegundos(telemetria.total_ms)}`,
+    `carga ${enSegundos(telemetria.carga_ms)}`,
+    prompt,
+    generacion,
+    `overhead ${enSegundos(telemetria.overhead_ms)}`,
+  ].join(" | ");
+}
+
+/*
+ * Un turno del agente puede costar varias llamadas al modelo. El
+ * usuario percibe la suma, no cada iteración, así que acumulamos
+ * las fases para poder atribuir el tiempo total del turno.
+ */
+type TelemetriaTurno = {
+  llamadas: number;
+  carga_ms: number;
+  prompt_eval_ms: number;
+  generacion_ms: number;
+  prompt_tokens: number;
+  tokens_generados: number;
+};
+
+function nuevaTelemetriaTurno(): TelemetriaTurno {
+  return {
+    llamadas: 0,
+    carga_ms: 0,
+    prompt_eval_ms: 0,
+    generacion_ms: 0,
+    prompt_tokens: 0,
+    tokens_generados: 0,
+  };
+}
+
+function acumularTelemetria(
+  turno: TelemetriaTurno,
+  telemetria: Telemetria
+): void {
+  turno.llamadas++;
+  turno.carga_ms += telemetria.carga_ms ?? 0;
+  turno.prompt_eval_ms += telemetria.prompt_eval_ms ?? 0;
+  turno.generacion_ms += telemetria.generacion_ms ?? 0;
+  turno.prompt_tokens += telemetria.prompt_tokens ?? 0;
+  turno.tokens_generados += telemetria.tokens_generados ?? 0;
+}
+
+function formatearTelemetriaTurno(turno: TelemetriaTurno): string {
+  const generacionSegundos = turno.generacion_ms / 1000;
+
+  const velocidad =
+    generacionSegundos > 0
+      ? (turno.tokens_generados / generacionSegundos).toFixed(1)
+      : "?";
+
+  return [
+    `${turno.llamadas} llamada(s)`,
+    `carga ${enSegundos(turno.carga_ms)}`,
+    `prompt ${turno.prompt_tokens} tok / ${enSegundos(turno.prompt_eval_ms)}`,
+    `generacion ${turno.tokens_generados} tok / ` +
+      `${enSegundos(turno.generacion_ms)} @ ${velocidad} tok/s`,
+  ].join(" | ");
+}
+
 function logOllamaResponse(response: OllamaResponse) {
   const content = response.message?.content ?? "";
   const toolCalls = response.message?.tool_calls ?? [];
+  const telemetria = extraerTelemetria(response);
 
   console.log("\n[OLLAMA RESPONSE]");
 
@@ -436,15 +611,14 @@ function logOllamaResponse(response: OllamaResponse) {
 
         tool_calls: toolCalls,
 
-        prompt_eval_count: response.prompt_eval_count,
-        eval_count: response.eval_count,
-
-        total_duration: response.total_duration,
+        telemetria,
       },
       null,
       2
     )
   );
+
+  console.log(`\n[OLLAMA TELEMETRY] ${formatearTelemetria(telemetria)}`);
 }
 
 async function callOllama(messages: Message[]): Promise<OllamaResponse> {
@@ -565,6 +739,7 @@ export async function responderConAgente(
   console.log(userText);
 
   const requestStart = performance.now();
+  const telemetriaTurno = nuevaTelemetriaTurno();
 
   const messages: Message[] = [
     {
@@ -584,6 +759,8 @@ export async function responderConAgente(
     const response = await callOllama(messages);
 
     const modelElapsed = performance.now() - modelStart;
+
+    acumularTelemetria(telemetriaTurno, extraerTelemetria(response));
 
     console.log(
       `\n[MODEL] Iteración ${iteration + 1}: ${modelElapsed.toFixed(0)} ms`
@@ -686,6 +863,10 @@ export async function responderConAgente(
 
       console.log(
         `\n[REQUEST COMPLETE] ${totalElapsed.toFixed(0)} ms`
+      );
+
+      console.log(
+        `[REQUEST TELEMETRY] ${formatearTelemetriaTurno(telemetriaTurno)}`
       );
 
       messages.push({
