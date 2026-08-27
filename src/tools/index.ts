@@ -139,7 +139,7 @@ export const toolDefinitions = [
     function: {
       name: "listar_stock_bajo",
       description:
-        "Lista productos cuyo stock disponible está en o por debajo de su punto de reorden. Sirve para preguntas generales de reabastecimiento, faltantes y para saber qué producto tiene menos stock. Devuelve resumen, paginacion y la lista productos de la página actual. El resumen se calcula sobre TODOS los registros que cumplen el filtro: registros cuenta combinaciones producto-sucursal, productos_distintos cuenta productos, y stock_minimo con productos_en_el_minimo dan el mínimo real y cuántos lo comparten. El tamaño de página lo fija la herramienta.",
+        "Lista productos cuyo stock disponible está en o por debajo de su punto de reorden. Sirve para preguntas generales de reabastecimiento, faltantes y para saber qué producto tiene menos stock. Devuelve resumen, paginacion y la lista productos de la página actual. El resumen se calcula sobre TODOS los registros que cumplen el filtro: registros cuenta combinaciones producto-sucursal (no productos), productos_distintos cuenta productos, registros_sin_stock cuenta registros en cero y equivale a la suma de los registros_sin_stock de por_sucursal, y stock_minimo con productos_en_el_minimo dan el mínimo real y cuántos lo comparten. El tamaño de página lo fija la herramienta.",
       parameters: {
         type: "object",
         properties: {
@@ -161,7 +161,7 @@ export const toolDefinitions = [
     function: {
       name: "listar_lotes_por_vencer",
       description:
-        "Lista lotes de cualquier producto que vencen dentro de una cantidad de días. Úsala para preguntas generales sobre próximos vencimientos. Devuelve un objeto con resumen (totales sobre todos los lotes que cumplen el filtro), paginacion y la lista lotes de la página actual.",
+        "Lista lotes de cualquier producto que vencen dentro de una cantidad de días. Úsala para preguntas generales sobre próximos vencimientos. Devuelve un objeto con resumen (totales sobre TODOS los lotes que cumplen el filtro, no sobre la página), paginacion y la lista lotes de la página actual. El tamaño de página lo fija la herramienta.",
       parameters: {
         type: "object",
         properties: {
@@ -173,11 +173,6 @@ export const toolDefinitions = [
           sucursal: {
             type: ["string", "null"],
             description: "Sucursal opcional.",
-          },
-          limite: {
-            type: ["integer", "null"],
-            description:
-              "Número de lotes por página. Por defecto 10 y máximo 50. Los totales del resumen siempre se calculan sobre todos los lotes, no sobre la página.",
           },
           offset: {
             type: ["integer", "null"],

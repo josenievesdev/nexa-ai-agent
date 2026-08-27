@@ -11,7 +11,13 @@ export type ListarLotesPorVencerArgs = {
 const DIAS_POR_DEFECTO = 30;
 const DIAS_MAXIMOS = 180;
 
+/*
+ * Igual que en listar_stock_bajo y consultar_mas_vendidos: el
+ * tamaño de página lo fija la herramienta y limite tiene piso, para
+ * que una llamada con limite 1 no pueda estrechar la evidencia.
+ */
 const LIMITE_POR_DEFECTO = 10;
+const LIMITE_MINIMO = 5;
 const LIMITE_MAXIMO = 50;
 
 type FilaResumen = {
@@ -30,7 +36,7 @@ type FilaSucursal = {
 };
 
 type FilaLote = {
-  producto_id: string;
+  producto_id: number;
   sku: string;
   producto: string;
   sucursal: string;
@@ -59,7 +65,7 @@ export async function listarLotesPorVencer(args: ListarLotesPorVencerArgs) {
   const limite = enteroAcotado(
     args.limite,
     LIMITE_POR_DEFECTO,
-    1,
+    LIMITE_MINIMO,
     LIMITE_MAXIMO
   );
 
@@ -111,7 +117,7 @@ export async function listarLotesPorVencer(args: ListarLotesPorVencerArgs) {
 
     sql<FilaLote[]>`
       select
-        producto_id,
+        producto_id::int as producto_id,
         sku,
 
         concat_ws(

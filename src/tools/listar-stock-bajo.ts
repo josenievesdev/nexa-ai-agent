@@ -22,8 +22,8 @@ const LIMITE_MAXIMO = 50;
 type FilaResumen = {
   registros: number;
   productos_distintos: number;
-  sin_stock: number;
-  con_stock: number;
+  registros_sin_stock: number;
+  registros_con_stock: number;
   stock_minimo: number | null;
   en_el_minimo: number;
   unidades_para_reponer: number;
@@ -32,13 +32,15 @@ type FilaResumen = {
 type FilaSucursal = {
   sucursal: string;
   registros: number;
-  sin_stock: number;
+  registros_sin_stock: number;
 };
 
 type FilaProducto = {
   producto_id: number;
   sku: string;
+  codigo_barras: string | null;
   producto: string;
+  forma: string | null;
   marca: string | null;
   sucursal: string;
   stock_disponible: number;
@@ -89,11 +91,11 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
 
         count(*) filter (
           where stock_disponible = 0
-        )::int as sin_stock,
+        )::int as registros_sin_stock,
 
         count(*) filter (
           where stock_disponible > 0
-        )::int as con_stock,
+        )::int as registros_con_stock,
 
         min(stock_disponible)::int as stock_minimo,
 
@@ -125,7 +127,7 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
 
         count(*) filter (
           where stock_disponible = 0
-        )::int as sin_stock
+        )::int as registros_sin_stock
 
       from vw_productos_stock_bajo
       where true
@@ -141,6 +143,17 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
         producto_id::int as producto_id,
         sku,
 
+        /*
+         * codigo_barras y forma_farmaceutica no son adorno: el
+         * flujo documentado de reabastecimiento es pedir los SKU y
+         * códigos de barras para buscarlos en el software de la
+         * farmacia, y la forma distingue un spray nasal de una
+         * tableta. Van como campos propios y no dentro del nombre,
+         * porque concatenarlos produce ruido del tipo
+         * "Ibuprofeno 400 mg Tableta Caja x 20 tabletas".
+         */
+        codigo_barras,
+
         concat_ws(
           ' ',
           nombre_generico,
@@ -148,6 +161,7 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
           presentacion
         ) as producto,
 
+        forma_farmaceutica as forma,
         nombre_comercial as marca,
         sucursal,
 
@@ -205,8 +219,8 @@ export async function listarStockBajo(args: ListarStockBajoArgs) {
       registros: total,
       productos_distintos: totales?.productos_distintos ?? 0,
       mostrados,
-      sin_stock: totales?.sin_stock ?? 0,
-      con_stock: totales?.con_stock ?? 0,
+      registros_sin_stock: totales?.registros_sin_stock ?? 0,
+      registros_con_stock: totales?.registros_con_stock ?? 0,
       stock_minimo: stockMinimo,
       productos_en_el_minimo: enElMinimo,
       unidades_para_reponer: totales?.unidades_para_reponer ?? 0,
