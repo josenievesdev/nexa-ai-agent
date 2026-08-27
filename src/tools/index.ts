@@ -183,17 +183,19 @@ export const toolDefinitions = [
     function: {
       name: "consultar_mas_vendidos",
       description:
-        "Consulta los productos más vendidos durante los últimos 30 días. Puede filtrarse por sucursal.",
+        "Consulta los productos más vendidos durante los últimos 30 días, ordenados por unidades. El ranking está agregado por producto: cada fila suma las sucursales y trae su reparto en por_sucursal. Devuelve un objeto con resumen (totales sobre TODOS los productos con ventas), paginacion y la lista productos de la página actual. El tamaño de página lo fija la herramienta.",
       parameters: {
         type: "object",
         properties: {
           sucursal: {
             type: ["string", "null"],
-            description: "Sucursal opcional.",
+            description:
+              "Sucursal opcional. Si se indica, el ranking se limita a esa sucursal.",
           },
-          limite: {
+          offset: {
             type: ["integer", "null"],
-            description: "Número máximo de resultados.",
+            description:
+              "Número de productos a omitir para pedir la siguiente página. Usa el valor de paginacion.siguiente_offset de la llamada anterior. Por defecto 0.",
           },
         },
       },
