@@ -152,6 +152,87 @@ REGLAS:
 - Si el usuario pide ver más resultados, vuelve a llamar la misma herramienta con offset igual a paginacion.siguiente_offset.
 `.trim();
 
+/*
+ * C3: el encadenamiento de herramientas no es determinista.
+ *
+ * Con "¿Dónde está el ibuprofeno?" el modelo identificó el
+ * producto, recibió la instrucción de encadenar dentro del payload
+ * de buscar_producto, la ignoró y cerró el turno prometiendo un
+ * dato que nunca fue a buscar. Con la presentación explícita el
+ * mismo flujo sí encadena: el steering mueve la probabilidad, no
+ * la fija.
+ *
+ * Este guard no intenta convencer al modelo: comprueba después de
+ * los hechos si la familia de herramientas que la pregunta exigía
+ * llegó a ejecutarse, y si no, no acepta la respuesta.
+ *
+ * La detección es deliberadamente conservadora. Forzar una
+ * herramienta de más cuesta una iteración y latencia, así que se
+ * exige además que el turno ya haya ejecutado alguna herramienta:
+ * una pregunta conversacional o meta no dispara nada y queda
+ * exenta.
+ */
+type IntencionDeDatos = {
+  nombre: string;
+  patron: RegExp;
+  herramientas: string[];
+};
+
+const INTENCIONES_DE_DATOS: IntencionDeDatos[] = [
+  {
+    nombre: "ubicación",
+    patron:
+      /(d[oó]nde|ubicaci[oó]n|ubicad|pasillo|estante|bodega|localiza)/i,
+    herramientas: ["consultar_ubicacion"],
+  },
+  {
+    nombre: "stock",
+    patron:
+      /(stock|existencias|inventario|agotad|faltante|reabastec|reorden|cu[aá]nt[oa]s? (hay|quedan|unidades|tenemos))/i,
+    herramientas: ["consultar_stock", "listar_stock_bajo"],
+  },
+  {
+    nombre: "lotes o vencimientos",
+    patron: /(lote|vence|vencen|vencimiento|caduc)/i,
+    herramientas: ["consultar_lotes", "listar_lotes_por_vencer"],
+  },
+  {
+    nombre: "ventas",
+    patron: /(vendid|ventas|rotaci[oó]n)/i,
+    herramientas: ["consultar_mas_vendidos"],
+  },
+];
+
+export function detectarIntenciones(texto: string): IntencionDeDatos[] {
+  return INTENCIONES_DE_DATOS.filter((intencion) =>
+    intencion.patron.test(texto)
+  );
+}
+
+/*
+ * La corrección va como mensaje del sistema inyectado justo antes
+ * del punto de decisión del modelo. Tres redacciones de reglas en
+ * el SYSTEM_PROMPT fallaron antes; lo que funciona en este modelo
+ * es la instrucción imperativa y cercana.
+ */
+function correccionDeCierre(faltantes: IntencionDeDatos[]): string {
+  const familias = faltantes
+    .map(
+      (intencion) =>
+        `${intencion.nombre} (${intencion.herramientas.join(" o ")})`
+    )
+    .join("; ");
+
+  return [
+    "NO HAS RESPONDIDO LA PREGUNTA.",
+    `La consulta del usuario requiere datos de ${familias},`,
+    "y en este turno no ejecutaste ninguna de esas herramientas.",
+    "Está prohibido responder sin ese dato y está prohibido pedir aclaración.",
+    "Ejecuta ahora la herramienta correspondiente, usando el producto_id que ya obtuviste,",
+    "y responde después únicamente con lo que devuelva.",
+  ].join(" ");
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -972,6 +1053,22 @@ export async function responderConAgente(
    */
   const cacheHerramientas = new Map<string, unknown>();
 
+  /*
+   * Guard de cierre de turno (C3). Las intenciones se leen solo de
+   * la pregunta actual: el historial no obliga a nada.
+   */
+  const intencionesDelTurno = detectarIntenciones(userText);
+  const herramientasEjecutadas = new Set<string>();
+  let correccionDeCierreAplicada = false;
+
+  if (intencionesDelTurno.length > 0) {
+    console.log(
+      `\n[TURN GUARD] Intención detectada: ${intencionesDelTurno
+        .map((intencion) => intencion.nombre)
+        .join(", ")}`
+    );
+  }
+
   const messages: Message[] = [
     {
       role: "system",
@@ -1090,6 +1187,50 @@ export async function responderConAgente(
      * tenemos una respuesta final válida.
      */
     if (toolCalls.length === 0) {
+      /*
+       * Antes de aceptar la respuesta, comprobamos que la evidencia
+       * que la pregunta exigía se haya buscado de verdad.
+       *
+       * Solo actuamos si el turno ya ejecutó alguna herramienta:
+       * sin eso no hay contexto de producto y forzar una llamada
+       * sería inventar trabajo.
+       */
+      const faltantes = intencionesDelTurno.filter(
+        (intencion) =>
+          !intencion.herramientas.some((herramienta) =>
+            herramientasEjecutadas.has(herramienta)
+          )
+      );
+
+      if (faltantes.length > 0 && herramientasEjecutadas.size > 0) {
+        const familias = faltantes
+          .map((intencion) => intencion.nombre)
+          .join(", ");
+
+        if (!correccionDeCierreAplicada) {
+          correccionDeCierreAplicada = true;
+
+          console.warn(
+            `\n[TURN GUARD] Respuesta final rechazada: la pregunta requiere ${familias} ` +
+              `y solo se ejecutó ${[...herramientasEjecutadas].join(", ")}. ` +
+              "Reinyectando corrección (único reintento)."
+          );
+
+          messages.push({
+            role: "system",
+            content: correccionDeCierre(faltantes),
+          });
+
+          continue;
+        }
+
+        throw new Error(
+          `El agente cerró el turno sin obtener los datos de ${familias} que la pregunta requería, ` +
+            "incluso después de una corrección explícita. " +
+            "La respuesta NO fue mostrada al usuario ni guardada en el historial."
+        );
+      }
+
       const totalElapsed = performance.now() - requestStart;
 
       console.log(
@@ -1112,6 +1253,14 @@ export async function responderConAgente(
            * Nunca persistimos resultados internos de tools.
            */
           if (message.role === "tool") {
+            return false;
+          }
+
+          /*
+           * Ni las correcciones que el guard de cierre inyecta:
+           * son andamiaje de este turno, no conversación.
+           */
+          if (message.role === "system") {
             return false;
           }
 
@@ -1157,6 +1306,8 @@ export async function responderConAgente(
           "Ollama devolvió un tool_call sin nombre de herramienta."
         );
       }
+
+      herramientasEjecutadas.add(toolName);
 
       console.log(`\n[TOOL REQUEST] ${toolName}`);
 
