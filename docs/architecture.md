@@ -1,18 +1,18 @@
-# NEXA AI - Architecture Overview
+# SIBIA AI - Architecture Overview
 
 ## 1. Descripción general
 
-NEXA AI es un agente inteligente empresarial diseñado para permitir la consulta de información organizacional mediante lenguaje natural.
+SIBIA AI es un agente inteligente empresarial diseñado para permitir la consulta de información organizacional mediante lenguaje natural.
 
 El sistema conecta un modelo de lenguaje local con fuentes de datos empresariales reales utilizando herramientas controladas, conocidas como tools.
 
-El objetivo de NEXA AI no es reemplazar los sistemas empresariales existentes, sino crear una capa inteligente de interacción que permita consultar información de forma más rápida y natural.
+El objetivo de SIBIA AI no es reemplazar los sistemas empresariales existentes, sino crear una capa inteligente de interacción que permita consultar información de forma más rápida y natural.
 
 Ejemplo:
 
 > ¿Dónde está el ibuprofeno de 400 mg en la sucursal Centro?
 
-En lugar de navegar manualmente por módulos, filtros y reportes, NEXA interpreta la consulta, identifica qué información necesita, utiliza herramientas autorizadas y genera una respuesta basada en los datos obtenidos.
+En lugar de navegar manualmente por módulos, filtros y reportes, SIBIA interpreta la consulta, identifica qué información necesita, utiliza herramientas autorizadas y genera una respuesta basada en los datos obtenidos.
 
 El modelo de inteligencia artificial no tiene acceso directo a PostgreSQL ni ejecuta consultas SQL arbitrarias.
 
@@ -38,7 +38,7 @@ Los sistemas empresariales suelen almacenar grandes cantidades de información e
 
 Sin embargo, acceder a esta información normalmente requiere conocer la interfaz del software, los módulos disponibles, filtros, reportes y procesos internos.
 
-NEXA AI propone una capa de lenguaje natural sobre estos sistemas.
+SIBIA AI propone una capa de lenguaje natural sobre estos sistemas.
 
 Flujo tradicional:
 
@@ -56,14 +56,14 @@ Reporte
 Información
 ```
 
-Con NEXA:
+Con SIBIA:
 
 ```text
 Empleado
    ↓
 Pregunta en lenguaje natural
    ↓
-NEXA AI
+SIBIA AI
    ↓
 Información empresarial
 ```
@@ -80,7 +80,7 @@ Información empresarial
                    Lenguaje natural
                             │
                             ▼
-                     NEXA AI Agent
+                     SIBIA AI Agent
                             │
                             ▼
                   Modelo local de IA
@@ -105,7 +105,7 @@ Información empresarial
                    Resultado estructurado
                             │
                             ▼
-                     NEXA AI Agent
+                     SIBIA AI Agent
                             │
                             ▼
                    Modelo local de IA
@@ -119,7 +119,7 @@ Información empresarial
 
 # 4. Principio fundamental de seguridad
 
-NEXA AI separa claramente el modelo de lenguaje de la base de datos.
+SIBIA AI separa claramente el modelo de lenguaje de la base de datos.
 
 Arquitectura NO utilizada:
 
@@ -159,7 +159,7 @@ Esto permite:
 
 # 5. Componentes principales
 
-## 5.1 NEXA AI Agent
+## 5.1 SIBIA AI Agent
 
 El agente funciona como orquestador del sistema.
 
@@ -217,7 +217,7 @@ La Tool Layer es la capa que conecta el agente con los datos empresariales.
 
 Cada herramienta representa una capacidad específica y controlada.
 
-Actualmente NEXA dispone de las siguientes herramientas.
+Actualmente SIBIA dispone de las siguientes herramientas.
 
 
 ## 6.1 buscar_producto
@@ -371,7 +371,7 @@ Flujo:
 Usuario
   │
   ▼
-NEXA recibe la pregunta
+SIBIA recibe la pregunta
   │
   ▼
 Qwen interpreta la intención
@@ -533,7 +533,7 @@ Las vistas principales de inventario, stock, ventas y lotes fueron actualizadas 
 
 # 10. Base de datos
 
-NEXA utiliza PostgreSQL alojado actualmente en Supabase.
+SIBIA utiliza PostgreSQL alojado actualmente en Supabase.
 
 El modelo de datos incluye:
 
@@ -770,7 +770,7 @@ Esto indica que las próximas optimizaciones deben concentrarse principalmente e
 
 # 16. Memoria conversacional
 
-Inicialmente NEXA guardaba dentro del historial:
+Inicialmente SIBIA guardaba dentro del historial:
 
 ```text
 Usuario
@@ -834,7 +834,7 @@ Esta migración incorporó una identidad consistente de producto en vistas y fun
 # 18. Estructura actual del proyecto
 
 ```text
-nexa-ai-agent/
+sibia-ai-agent/
 │
 ├── database/
 │   ├── migrations/
@@ -912,14 +912,14 @@ nexa-ai-agent/
 
 # 20. Estado actual
 
-Actualmente NEXA AI dispone de:
+Actualmente SIBIA AI dispone de:
 
 ```text
 Agente local funcional
 Tool Calling
 7 herramientas empresariales
 PostgreSQL / Supabase
-Base de datos simulada de farmacia
+Base de datos de demostración
 Búsqueda flexible de productos
 Inventario por sucursal
 Ubicación física
@@ -942,7 +942,7 @@ La interfaz actual es una CLI ejecutada desde terminal.
 
 # 21. Consultas demostrativas
 
-NEXA puede responder preguntas como:
+SIBIA puede responder preguntas como:
 
 ```text
 ¿Dónde está el ibuprofeno de 400 mg en Centro?
@@ -988,7 +988,7 @@ Limitaciones actuales:
 - No existen usuarios ni autenticación.
 - No existe API pública.
 - No existe persistencia completa de conversaciones.
-- El dominio demostrativo actual es farmacia.
+- El agente está acoplado a un único dominio demostrativo.
 - Algunas capacidades empresariales todavía no tienen herramientas.
 
 
@@ -1043,10 +1043,10 @@ Limitaciones actuales:
                 └──────┬──────┘
                        │
                        ▼
-                 NEXA API
+                 SIBIA API
                        │
                        ▼
-                 NEXA Agent
+                 SIBIA Agent
                        │
                        ▼
                   Tool Layer
@@ -1061,7 +1061,7 @@ Limitaciones actuales:
 
 # 25. Conclusión
 
-NEXA AI busca demostrar que un modelo de lenguaje puede convertirse en una interfaz inteligente sobre datos empresariales sin necesidad de darle acceso directo a los sistemas internos.
+SIBIA AI busca demostrar que un modelo de lenguaje puede convertirse en una interfaz inteligente sobre datos empresariales sin necesidad de darle acceso directo a los sistemas internos.
 
 La arquitectura separa:
 
@@ -1083,6 +1083,6 @@ El principio central del proyecto es:
 
 > El modelo decide qué información necesita, las herramientas realizan operaciones controladas y la base de datos continúa siendo la fuente de verdad.
 
-NEXA AI no busca que el modelo conozca los datos de una empresa.
+SIBIA AI no busca que el modelo conozca los datos de una empresa.
 
 Busca que el modelo sepa cómo encontrar esos datos de forma segura, controlada y comprensible.

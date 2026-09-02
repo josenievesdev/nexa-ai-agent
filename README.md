@@ -1,15 +1,15 @@
-# NEXA AI
+# SIBIA AI
 
 Agente local de inteligencia artificial para consultar información empresarial mediante lenguaje natural, herramientas controladas y PostgreSQL.
 
-NEXA AI conecta un modelo de lenguaje local con datos reales de una organización mediante herramientas especializadas, permitiendo consultar inventarios, ubicaciones, stock, lotes y ventas de forma conversacional.
+SIBIA AI conecta un modelo de lenguaje local con datos reales de una organización mediante herramientas especializadas, permitiendo consultar inventarios, ubicaciones, stock, lotes y ventas de forma conversacional.
 
 ## ¿Cómo funciona?
 
 ```text
 Usuario
   ↓
-NEXA AI Agent
+SIBIA AI Agent
   ↓
 Modelo local
 Ollama + Qwen
@@ -52,7 +52,7 @@ Los datos empresariales son obtenidos mediante herramientas previamente definida
 
 ## Caso demostrativo
 
-El prototipo actual utiliza una base de datos simulada de una farmacia.
+El prototipo actual utiliza una base de datos de demostración.
 
 Ejemplos de consultas:
 
@@ -123,7 +123,7 @@ src/
 
 ## Principio de arquitectura
 
-NEXA utiliza una arquitectura basada en herramientas:
+SIBIA utiliza una arquitectura basada en herramientas:
 
 ```text
 Lenguaje natural
@@ -141,7 +141,7 @@ El modelo interpreta la solicitud y selecciona herramientas, mientras que las he
 
 ## Estado actual
 
-NEXA AI se encuentra actualmente en etapa de prototipo funcional y utiliza una interfaz CLI desde terminal.
+SIBIA AI se encuentra actualmente en etapa de prototipo funcional y utiliza una interfaz CLI desde terminal.
 
 Entre las siguientes etapas del proyecto se encuentran:
 

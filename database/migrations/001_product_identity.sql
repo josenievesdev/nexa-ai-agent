@@ -1,4 +1,4 @@
--- NEXA AI
+-- SIBIA
 -- Migration 001: identidad consistente de productos
 -- Actualiza vistas y búsqueda sin eliminar datos de las tablas.
 

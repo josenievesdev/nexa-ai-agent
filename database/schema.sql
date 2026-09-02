@@ -1,4 +1,4 @@
--- NEXA AI - esquema robusto de farmacia para PostgreSQL / Supabase
+-- SIBIA - esquema robusto de inventario para PostgreSQL / Supabase
 
 create extension if not exists pg_trgm;
 create extension if not exists unaccent;

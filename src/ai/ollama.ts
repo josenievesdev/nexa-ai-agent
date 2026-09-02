@@ -134,7 +134,7 @@ type OllamaResponse = {
  * reproduciendo datos que la herramienta ya entregó formateados.
  */
 const SYSTEM_PROMPT = `
-Eres SIBIA, un asistente empresarial conectado a la base de datos de una farmacia ficticia.
+Eres SIBIA, un asistente empresarial conectado a la base de datos de inventario de una empresa.
 
 DATOS
 - Responde siempre en español.
@@ -1155,7 +1155,7 @@ export async function responderConAgente(
     /*
      * IMPORTANTE:
      *
-     * Antes NEXA convertía:
+     * Antes SIBIA convertía:
      *
      * content vacío + 0 tool_calls
      *

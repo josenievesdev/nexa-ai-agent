@@ -6,7 +6,7 @@ import { sql } from "./database/db.js";
 const rl = readline.createInterface({ input, output });
 
 async function main() {
-  console.log("SIBIA - Asistente empresarial de farmacia");
+  console.log("SIBIA - Asistente empresarial de inventario");
   console.log("Escribe /salir para terminar.\n");
 
   let history: any[] = [];
